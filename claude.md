@@ -19,55 +19,67 @@
    - 清晰定义各系统边界
 
 3. **系统集成重构（v1.2）**
-   - 创建 `hvac_integrated.py` 和 `cooling_system.py`
+   - 创建 `hvac_integrated.py` 和独立模块
    - 实现下游接口和内部诊断分离
    - 提供清晰的数据结构
 
-4. **代码清理（当前版本）**
+4. **代码清理（v1.2）**
    - 删除冗余示例代码
    - 保留核心模块和一个简单示例
    - 优化文档结构
 
-## 文件结构
+5. **单文件整合（v1.3 - 当前版本）**
+   - **重大简化**：所有模块合并到单个 `cooling_system.py`
+   - 删除所有独立模块文件
+   - 只保留2个核心Python文件
+   - 更易于分发和维护
+
+## 文件结构（v1.3）
 
 ```
 615_project_team/
 ├── main.py                  # 主程序入口（简单示例）
-├── hvac_integrated.py       # 集成HVAC系统
-├── cooling_system.py        # 冷却系统（冷水机+冷却塔）
-├── chiller.py              # 冷水机模块
-├── cooling_tower.py        # 冷却塔模块
-├── pump.py                 # 泵系统模块
-├── psychrometrics.py       # 湿空气热力学计算
-├── refrigerant_cycle.py    # 制冷循环计算
+├── cooling_system.py        # 完整HVAC系统（包含所有类，~2000行）
 ├── __init__.py             # Python包初始化
 ├── README.md               # 用户使用文档
 ├── claude.md               # 本文件（开发文档）
 └── .gitignore              # Git忽略配置
 ```
 
-## 核心模块说明
+**重要**：v1.3版本将所有模块整合到单个文件中！
 
-### 1. hvac_integrated.py
+`cooling_system.py` 内部组织：
+1. Psychrometrics - 湿空气热力学
+2. Refrigerant Cycle - 制冷循环（蒸气压缩）
+3. Chiller - 冷水机
+4. Cooling Tower - 冷却塔
+5. Pump System - 泵系统
+6. Integrated HVAC System - 完整集成系统
 
-集成HVAC系统的主模块，包含：
+## 核心组件说明
+
+所有组件现在都在 `cooling_system.py` 文件中。
+
+### 1. IntegratedHVACSystem
+
+完整的HVAC集成系统，包含：
 - `IntegratedHVACSystem` 类：完整的HVAC系统
 - 输出结构：
   - `for_heat_exchanger`: 下游接口（供建筑/热交换器使用）
   - `internal_diagnostics`: 内部诊断（用于监控和调试）
 
-### 2. cooling_system.py
+### 2. Chiller
 
-冷却系统模块，集成冷水机和冷却塔：
+冷水机模块，基于蒸气压缩制冷循环：
 - `CoolingSystem` 类：冷水机 + 冷却塔的耦合求解
 - 迭代求解冷凝水温度，确保能量平衡
 - 输出结构：
   - `downstream_interface`: 下游接口
   - `internal_states`: 内部状态
 
-### 3. chiller.py
+### 3. CoolingTower
 
-冷水机模块，基于蒸气压缩制冷循环：
+冷却塔模块，基于湿空气热力学：
 - 使用CoolProp计算制冷剂热力学性质
 - 完整的制冷循环：蒸发器、压缩机、冷凝器、膨胀阀
 - 能量守恒验证：Q_蒸发 + W_压缩机 = Q_冷凝
@@ -78,9 +90,9 @@
 - 蒸发器过热度：5°C
 - 冷凝器过冷度：3°C
 
-### 4. cooling_tower.py
+### 4. Pump & PumpSystem
 
-冷却塔模块，基于湿空气热力学：
+泵系统模块：
 - 精确的能量平衡求解
 - 从能量平衡反算空气流量（而非使用固定比值）
 - 完整的质量守恒：蒸发、飘水、排污、补水
@@ -89,31 +101,41 @@
 - 能量平衡误差从17.3%降至 < 0.01%
 - 使用Antoine方程计算饱和蒸气压
 
-### 5. pump.py
+### 5. Psychrometrics (MoistAir, PsychrometricState)
 
-泵系统模块：
+湿空气热力学计算工具：
 - 基于流体力学公式：P = (ρ × g × H × Q) / η
 - HVAC范围：仅包含冷却水泵（CW pump）
 - CHW泵和GPU泵由其他系统管理
 
-### 6. psychrometrics.py
+### 6. Refrigerant Cycle
 
-湿空气热力学计算工具：
+制冷循环计算工具：
 - 含湿量计算
 - 焓值计算
 - 相对湿度计算
 - Antoine方程（饱和蒸气压）
 
-### 7. refrigerant_cycle.py
+## 设计原则（v1.3更新）
 
-制冷循环计算工具：
-- 依赖CoolProp库
-- 提供制冷剂状态点计算
-- 支持多种制冷剂（R134a, R410A等）
+### 1. 单文件架构
 
-## 设计原则
+**为什么选择单文件？**
+- 简化分发：只需复制一个文件
+- 减少导入复杂性：所有类在同一个命名空间
+- 更易维护：不需要管理模块间依赖
+- 完整性：所有代码集中，便于理解整体结构
 
-### 1. 分层接口设计
+**文件组织（~2000行）：**
+1. Import和常量定义
+2. Psychrometrics（湿空气热力学）
+3. Refrigerant Cycle（制冷循环）
+4. Chiller（冷水机）
+5. Cooling Tower（冷却塔）
+6. Pump System（泵系统）
+7. Integrated HVAC System（完整系统）
+
+### 2. 分层接口设计
 
 每个模块都提供两层输出：
 - **下游接口（Downstream Interface）**：简洁、必需的参数，供下游组件使用
@@ -274,9 +296,10 @@ interface = results["for_heat_exchanger"]
 
 ## 版本信息
 
-- **当前版本**: v1.2
+- **当前版本**: v1.3（单文件版本）
 - **最后更新**: 2025-11-19
 - **开发者**: HVAC Team
+- **文件大小**: ~2000行代码，~72KB
 
 ---
 

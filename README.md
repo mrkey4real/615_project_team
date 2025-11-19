@@ -42,27 +42,26 @@ python main.py
 
 ```
 ├── main.py                 # 主程序（运行示例）
-├── cooling_system.py       # 统一入口模块（导出所有组件）
-├── hvac_integrated.py      # HVAC集成系统
-├── chiller.py             # 冷水机模块
-├── cooling_tower.py       # 冷却塔模块
-├── pump.py                # 泵系统模块
-├── psychrometrics.py      # 湿空气热力学
-├── refrigerant_cycle.py   # 制冷循环计算
+├── cooling_system.py       # 完整HVAC系统（包含所有类）
 ├── README.md              # 本文件（用户文档）
 └── claude.md              # 开发文档
 ```
 
-**注意**：`cooling_system.py` 是统一入口，导入所有HVAC组件。使用时只需：
-```python
-from cooling_system import IntegratedHVACSystem
-```
+**重要**：所有HVAC组件都在 `cooling_system.py` 这一个文件中！
 
-## 核心模块
+包含的类：
+- **MoistAir, PsychrometricState** - 湿空气热力学
+- **RefrigerantState, VaporCompressionCycle, HeatExchanger** - 制冷循环
+- **Chiller** - 冷水机
+- **CoolingTower** - 冷却塔
+- **Pump, PumpSystem** - 泵系统
+- **IntegratedHVACSystem** - 完整HVAC集成系统
 
-### 1. 集成HVAC系统 (`hvac_integrated.py`)
+## 核心组件
 
-完整的HVAC系统，包括空气循环、热交换器和冷却系统。
+### 1. 完整HVAC系统 (IntegratedHVACSystem)
+
+完整的HVAC系统，包括空气循环、热交换器和冷却系统。所有组件都在 `cooling_system.py` 中。
 
 **使用示例：**
 ```python
@@ -90,36 +89,7 @@ results = system.solve()
 - `for_heat_exchanger`: 下游接口（供热交换器使用）
 - `internal_diagnostics`: 内部诊断（用于监控）
 
-### 2. 冷却系统 (`cooling_system.py`)
-
-冷水机和冷却塔的集成模块，自动处理两者的耦合迭代。
-
-**使用示例：**
-```python
-from cooling_system import CoolingSystem
-
-cooling_sys = CoolingSystem(
-    chiller_capacity_MW=100.0,
-    chiller_cop=6.0,
-    t_chw_supply_C=7.0,
-    tower_approach_C=4.0,
-    tower_coc=4.0,
-)
-
-result = cooling_sys.solve(
-    q_cooling_load_W=100e6,
-    m_dot_chw_kg_s=4777,
-    t_chw_return_C=12.0,
-    t_wb_ambient_C=24.0,
-    t_db_ambient_C=35.0,
-)
-```
-
-**输出结构：**
-- `downstream_interface`: 下游接口
-- `internal_states`: 内部状态（冷水机、冷却塔详细信息）
-
-### 3. 冷水机 (`chiller.py`)
+### 2. 冷水机 (Chiller)
 
 基于蒸气压缩制冷循环的冷水机模型。
 
@@ -134,7 +104,7 @@ result = cooling_sys.solve(
 - 蒸发器过热度：5°C
 - 冷凝器过冷度：3°C
 
-### 4. 冷却塔 (`cooling_tower.py`)
+### 3. 冷却塔 (CoolingTower)
 
 基于湿空气热力学的冷却塔模型。
 
@@ -149,7 +119,7 @@ result = cooling_sys.solve(
 - 浓缩倍数（COC）：4-6
 - 飘水率：0.001%
 
-### 5. 泵系统 (`pump.py`)
+### 4. 泵系统 (Pump, PumpSystem)
 
 基于流体力学的泵功率计算。
 
@@ -306,16 +276,20 @@ result = cooling_sys.solve(..., max_iter=100, tolerance=0.05)
 
 ## 版本历史
 
+### v1.3 (2025-11-19) - 单文件版本
+- **重大简化**：所有模块合并到单个 `cooling_system.py` 文件
+- 删除所有独立模块文件（psychrometrics, refrigerant_cycle, chiller等）
+- 只保留2个Python文件：`cooling_system.py` 和 `main.py`
+- 更简洁的代码组织，更容易维护和分发
+
 ### v1.2 (2025-11-19)
 - 代码清理，删除冗余示例代码
 - 创建简单的main.py作为运行入口
-- 创建cooling_system.py作为统一模块入口
 - 优化文档结构，分离用户文档和开发文档
 
 ### v1.1 (2025-11-10)
 - 修复冷却塔能量平衡（误差从17.3%降至<0.01%）
 - 明确泵系统范围（HVAC只包含CW泵）
-- 创建集成模块（hvac_integrated.py, cooling_system.py）
 
 ### v1.0 (2025-11-10)
 - 初始版本
