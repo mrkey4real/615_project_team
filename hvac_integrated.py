@@ -99,7 +99,14 @@ class AirCooledEquipment:                                                       
             t_out = self.t_air_max_C
             q_abs = (t_out - self.t_air_in_C) * self.cp_air * m_dot_air_kg_s
             q_unmet = max(self.q_in_W - q_abs, 0.0)
-        return {"m_dot_air_kg_s": m_dot_air_kg_s, "T_out_air_C": t_out, "Q_absorbed_W": q_abs, "Q_unmet_W": q_unmet}
+        return {
+            "m_dot_air_kg_s": m_dot_air_kg_s,
+            "T_in_air_C": self.t_air_in_C,
+            "T_out_air_C": t_out,
+            "Q_in_W": self.q_in_W,
+            "Q_absorbed_W": q_abs,
+            "Q_unmet_W": q_unmet,
+        }
 
 
 # ------------- Building Heat Exchanger (ε-model) -------------
@@ -125,7 +132,9 @@ class BuildingHeatExchanger:                                                    
         t_cold_out = self.t_cold_in_C + Q / C_cold if C_cold > 0 else self.t_cold_in_C
         return {
             "Q_transferred_W": Q,
+            "T_hot_in_C": self.t_hot_in_C,
             "T_hot_out_C": t_hot_out,
+            "T_cold_in_C": self.t_cold_in_C,
             "T_cold_out_C": t_cold_out,
             "m_dot_hot_kg_s": self.m_dot_hot_kg_s,
             "m_dot_cold_kg_s": self.m_dot_cold_kg_s,
@@ -183,26 +192,12 @@ def _normalize_chiller_out(ch_out: dict) -> dict:
     return out
 
 
-# --------- Imports of team modules (optional) ---------                    ZQ's components
-_COOLING_TOWER_AVAILABLE = False
-_PUMP_SYSTEM_AVAILABLE = False
-_CHILLER_AVAILABLE = False
+# --------- Imports of team modules (optional) ---------
+_COOLING_SYSTEM_AVAILABLE = False
 try:
-    from cooling_tower import CoolingTower
+    from cooling_system import CoolingSystem
 
-    _COOLING_TOWER_AVAILABLE = True
-except Exception:
-    pass
-try:
-    from pump import PumpSystem
-
-    _PUMP_SYSTEM_AVAILABLE = True
-except Exception:
-    pass
-try:
-    from chiller import Chiller
-
-    _CHILLER_AVAILABLE = True
+    _COOLING_SYSTEM_AVAILABLE = True
 except Exception:
     pass
 
@@ -230,6 +225,15 @@ class IntegratedHVACSystem:
     tol_C: float = 0.05
 
     def solve(self) -> Dict[str, Dict]:
+        """
+        Solve complete HVAC system including air loop, building HX, and cooling system.
+
+        Returns:
+            dict with two main sections:
+                - for_heat_exchanger: Interface values for heat exchanger/building
+                - internal_diagnostics: Detailed component states for monitoring
+        """
+        # ===== AIR LOOP =====
         air_pump = AirPump(self.pump_power_W, self.air_delta_p_Pa, self.air_eta, RHO_AIR_25C)
         m_dot_air = air_pump.mass_flow_rate()
 
@@ -238,6 +242,8 @@ class IntegratedHVACSystem:
         q_hot_to_hx = ace_result["Q_absorbed_W"]
         t_hot_in = ace_result["T_out_air_C"]
 
+        # ===== BUILDING HEAT EXCHANGER =====
+        # Estimate CHW flow based on load
         m_dot_chw_guess = max(q_hot_to_hx, 1e-3) / (CP_WATER * max(self.deltaT_chw_design_C, 1e-6))
 
         hx = BuildingHeatExchanger(
@@ -255,58 +261,102 @@ class IntegratedHVACSystem:
         t_chw_return = hx_result["T_cold_out_C"]
         m_dot_chw = hx_result["m_dot_cold_kg_s"]
 
-        deltaT_cw_typ = 5.5
-        q_cond_est = 1.15 * q_evap
-        m_dot_cw = max(q_cond_est, 1e-3) / (CP_WATER * deltaT_cw_typ)
-
-        if _CHILLER_AVAILABLE:
-            chlr = Chiller(
-                rated_capacity_mw=1.0,  # placeholder
-                rated_cop=self.chiller_cop,
-                t_chw_supply=self.t_chw_supply_C,
-                refrigerant="R134a",
-                eta_is_comp=0.8,
+        # ===== COOLING SYSTEM (Chiller + Tower) =====
+        if not _COOLING_SYSTEM_AVAILABLE:
+            raise ImportError(
+                "cooling_system module missing. Please ensure cooling_system.py is available."
             )
-        else:
-            chlr = SimpleChiller(self.chiller_cop, self.t_chw_supply_C, CP_WATER)
 
-        if not _COOLING_TOWER_AVAILABLE:
-            raise ImportError("cooling_tower module missing. Please keep cooling_tower.py with this script.")
-        tower = CoolingTower(approach_temp=4.0, coc=4, drift_rate=1e-5, air_to_water_ratio=1.2)
+        cooling_sys = CoolingSystem(
+            chiller_capacity_MW=q_evap / 1e6,  # Size to load
+            chiller_cop=self.chiller_cop,
+            t_chw_supply_C=self.t_chw_supply_C,
+            tower_approach_C=4.0,
+            tower_coc=4.0,
+        )
 
-        t_cw_in = self.t_wb_C + tower.approach + 0.5
-        tower_out = None
-        ch_out = None
-        for _ in range(self.max_iter):
-            raw_ch_out = chlr.solve_energy_balance(q_evap, m_dot_chw, m_dot_cw, t_cw_in, t_chw_return)
-            ch_out = _normalize_chiller_out(raw_ch_out)
-            tower_out = tower.solve(q_cond=ch_out["Q_cond_W"], m_dot_cw=m_dot_cw, t_in=ch_out["T_cw_out_C"],
-                                    t_wb=self.t_wb_C, t_db=self.t_db_C)
-            t_cw_in_new = tower_out["T_water_out_C"]
-            if abs(t_cw_in_new - t_cw_in) < self.tol_C:
-                t_cw_in = t_cw_in_new
-                break
-            t_cw_in = t_cw_in_new
+        cooling_result = cooling_sys.solve(
+            q_cooling_load_W=q_evap,
+            m_dot_chw_kg_s=m_dot_chw,
+            t_chw_return_C=t_chw_return,
+            t_wb_ambient_C=self.t_wb_C,
+            t_db_ambient_C=self.t_db_C,
+        )
 
-        if _PUMP_SYSTEM_AVAILABLE:
-            pump_system = PumpSystem(cw_static_head=10.0, cw_efficiency=0.85)
-            cw_pump = pump_system.solve(m_dot_cw=m_dot_cw)
-        else:
-            cw_pump = {"component": "HVAC Pump System (CW Loop)", "P_pump_W": 0.0}
-
+        # ===== PACKAGE RESULTS =====
+        # Separate outputs for downstream vs internal monitoring
         return {
-            "air_pump": {"m_dot_air_kg_s": m_dot_air, "power_W": self.pump_power_W, "delta_p_Pa": self.air_delta_p_Pa,
-                         "efficiency": self.air_eta},
-            "air_cooled_equipment": ace_result,
-            "heat_exchanger": hx_result,
-            "chiller": ch_out,
-            "cooling_tower": tower_out,
-            "cw_pump": cw_pump,
-            "design": {"deltaT_chw_design_C": self.deltaT_chw_design_C, "deltaT_cw_typ_C": deltaT_cw_typ},
+            # ========================================
+            # FOR HEAT EXCHANGER / BUILDING
+            # ========================================
+            # These are the key values that downstream components need
+            "for_heat_exchanger": {
+                "component": "HVAC_System",
+                # Chilled water interface
+                "T_chw_supply_C": self.t_chw_supply_C,
+                "T_chw_return_C": t_chw_return,
+                "m_dot_chw_kg_s": m_dot_chw,
+                "deltaT_chw_C": t_chw_return - self.t_chw_supply_C,
+                "Q_cooling_W": q_evap,
+                "Q_cooling_MW": q_evap / 1e6,
+                # System performance
+                "system_COP": cooling_result["downstream_interface"]["system_COP"],
+                "total_power_MW": cooling_result["downstream_interface"]["total_power_MW"],
+            },
+
+            # ========================================
+            # INTERNAL DIAGNOSTICS
+            # ========================================
+            # Detailed states for monitoring, debugging, validation
+            "internal_diagnostics": {
+                "air_loop": {
+                    "air_pump": {
+                        "m_dot_air_kg_s": m_dot_air,
+                        "power_W": self.pump_power_W,
+                        "delta_p_Pa": self.air_delta_p_Pa,
+                        "efficiency": self.air_eta,
+                    },
+                    "air_cooled_equipment": {
+                        "Q_load_W": ace_result["Q_in_W"],
+                        "Q_absorbed_W": ace_result["Q_absorbed_W"],
+                        "Q_unmet_W": ace_result["Q_unmet_W"],
+                        "T_air_in_C": ace_result["T_in_air_C"],
+                        "T_air_out_C": ace_result["T_out_air_C"],
+                    },
+                },
+                "building_heat_exchanger": {
+                    "Q_transferred_W": hx_result["Q_transferred_W"],
+                    "Q_transferred_MW": hx_result["Q_transferred_W"] / 1e6,
+                    "effectiveness": self.hx_effectiveness,
+                    "hot_side": {
+                        "fluid": "air",
+                        "T_in_C": hx_result["T_hot_in_C"],
+                        "T_out_C": hx_result["T_hot_out_C"],
+                        "m_dot_kg_s": hx_result["m_dot_hot_kg_s"],
+                    },
+                    "cold_side": {
+                        "fluid": "chilled_water",
+                        "T_in_C": self.t_chw_supply_C,
+                        "T_out_C": t_chw_return,
+                        "m_dot_kg_s": m_dot_chw,
+                    },
+                },
+                "cooling_system": cooling_result["internal_states"],
+                "design_parameters": {
+                    "deltaT_chw_design_C": self.deltaT_chw_design_C,
+                    "t_chw_supply_C": self.t_chw_supply_C,
+                    "chiller_cop": self.chiller_cop,
+                    "hx_effectiveness": self.hx_effectiveness,
+                },
+            },
         }
 
 
 if __name__ == "__main__":
+    print("\n" + "=" * 80)
+    print("INTEGRATED HVAC SYSTEM TEST")
+    print("=" * 80)
+
     system = IntegratedHVACSystem(
         pump_power_W=250_000.0,
         air_delta_p_Pa=900.0,
@@ -318,11 +368,52 @@ if __name__ == "__main__":
         deltaT_chw_design_C=5.0,
         hx_effectiveness=0.80,
         t_wb_C=24.0,
-        t_db_C=None,
+        t_db_C=35.0,
         chiller_cop=6.0,
     )
-    results = system.solve()
-    import json
-    from hvac_integrated import to_jsonable
 
-    print(json.dumps(to_jsonable(results), indent=2))
+    print("\nSolving system...")
+    results = system.solve()
+
+    # ===== SHOW HEAT EXCHANGER INTERFACE =====
+    print("\n" + "=" * 80)
+    print("FOR HEAT EXCHANGER / BUILDING (Downstream Interface)")
+    print("=" * 80)
+    hx_interface = results["for_heat_exchanger"]
+    print(f"Component:             {hx_interface['component']}")
+    print(f"CHW Supply Temp:       {hx_interface['T_chw_supply_C']:.2f} °C")
+    print(f"CHW Return Temp:       {hx_interface['T_chw_return_C']:.2f} °C")
+    print(f"CHW Flow Rate:         {hx_interface['m_dot_chw_kg_s']:.0f} kg/s")
+    print(f"CHW Delta-T:           {hx_interface['deltaT_chw_C']:.2f} °C")
+    print(f"Cooling Capacity:      {hx_interface['Q_cooling_MW']:.1f} MW")
+    print(f"System COP:            {hx_interface['system_COP']:.2f}")
+    print(f"Total Power:           {hx_interface['total_power_MW']:.1f} MW")
+
+    # ===== SHOW INTERNAL DIAGNOSTICS (SUMMARY) =====
+    print("\n" + "=" * 80)
+    print("INTERNAL DIAGNOSTICS (Summary)")
+    print("=" * 80)
+    diagnostics = results["internal_diagnostics"]
+
+    print("\n--- Air Loop ---")
+    print(f"Air Flow:              {diagnostics['air_loop']['air_pump']['m_dot_air_kg_s']:.0f} kg/s")
+    print(f"Air Pump Power:        {diagnostics['air_loop']['air_pump']['power_W']/1e6:.2f} MW")
+    print(f"Heat Absorbed:         {diagnostics['air_loop']['air_cooled_equipment']['Q_absorbed_W']/1e6:.1f} MW")
+
+    print("\n--- Building Heat Exchanger ---")
+    print(f"Heat Transferred:      {diagnostics['building_heat_exchanger']['Q_transferred_MW']:.1f} MW")
+    print(f"Effectiveness:         {diagnostics['building_heat_exchanger']['effectiveness']:.2f}")
+
+    print("\n--- Cooling System ---")
+    cs = diagnostics['cooling_system']
+    print(f"Chiller COP:           {cs['chiller']['COP']:.2f}")
+    print(f"Compressor Power:      {cs['chiller']['W_comp_MW']:.1f} MW")
+    print(f"Tower Fan Power:       {cs['cooling_tower']['W_fan_MW']:.1f} MW")
+    print(f"Water Makeup:          {cs['cooling_tower']['m_makeup_L_hr']:,.0f} L/hr")
+
+    # ===== OPTIONALLY SHOW FULL JSON =====
+    print("\n" + "=" * 80)
+    print("Full results available in JSON format (uncomment to see)")
+    print("=" * 80)
+    # import json
+    # print(json.dumps(to_jsonable(results), indent=2))
